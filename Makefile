@@ -20,6 +20,10 @@ ifdef PERF
 	TEST_PREFIX:=perf stat
 endif
 
+ifdef ANALYZE
+	MISCFLAGS+=-fanalyzer
+endif
+
 ifdef OPTIMIZED
 # On mingw, -static avoids dep on libssp-0.dll when built with -fstack-protector
 	MISCFLAGS+=-DNDEBUG -Werror -static
@@ -27,8 +31,7 @@ else
 	MISCFLAGS+=$(DEVFLAGS)
 endif
 
-CFLAGS=-std=c11 $(OPT) $(CWARNFLAGS) $(WARNFLAGS) $(MISCFLAGS) -DLZW_MAX_CODE_WIDTH=$(BITWIDTH)
-CXXFLAGS=-std=gnu++17 -fno-rtti $(OPT) $(WARNFLAGS) $(MISCFLAGS)
+CFLAGS=-std=c11 $(OPT) $(CWARNFLAGS) $(WARNFLAGS) $(MISCFLAGS)
 
 .PHONY: clean test
 

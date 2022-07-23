@@ -19,10 +19,12 @@ struct huffman_state {
 	struct symcnt_t symtable[256];
 };
 
-static void dump_symtable(struct symcnt_t *symtab, int len) {
+static void dump_symtable(struct symcnt_t *symtab, int len, int cut) {
+	printf("Dumping symtable (cut=%d):\n", cut);
 	for (int i=0 ; i < len ; ++i) {
-		if (symtab[i].cnt > 0)
-			printf("%d: %zu\n", symtab[i].sym, symtab[i].cnt);
+		if (cut && symtab[i].cnt == 0)
+			continue;
+		printf("[%03d] sym:%03d, cnt:%zu\n", i, symtab[i].sym, symtab[i].cnt);
 	}
 }
 
@@ -39,11 +41,33 @@ static void huff_update_symtable(struct symcnt_t *symtab, int size, uint8_t *inp
 	}
 }
 
+static inline int sort_predicate(const struct symcnt_t a, const struct symcnt_t b) {
+	return (a.cnt > b.cnt);
+}
+
+static void huff_sort_symtable(struct symcnt_t *symtab, size_t n) {
+	struct symcnt_t *arr = symtab;
+	struct symcnt_t x;
+
+	printf("Sorting symbol table...\n");
+
+	// isort3
+	size_t j;
+	for (size_t i = 1 ; i < n ; ++i) {
+		x = arr[i];
+		for (j = i ; j > 0 && sort_predicate(arr[j-1], x) ; --j) {
+			arr[j] = arr[j-1];
+		}
+		arr[j] = x;
+	}
+}
+
+
 static void huff_init(struct huffman_state *state) {
 	huff_init_symtable(state->symtable, 256);
 }
 
-static void huff_build_tree(struct huffman_state *state, uint8_t *buf, size_t len) {
+static void huff_build_tree(struct huffman_state *state) {
 
 #if 0
 	queue 1 <- original symtable, sorted lowest count to highest (ignore zero cnt)
@@ -78,24 +102,26 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-	size_t buf_len = fread(buf, 1, sizeof(buf), f);
-	fclose(f);
-
-	if (!buf_len) {
-		fprintf(stderr, "No input to work on.\n");
-		exit(1);
-	}
-
-	printf("Read %zu bytes.\n", buf_len);
-
 	struct huffman_state state = { 0 };
-
 	huff_init(&state);
-	huff_update_symtable(state.symtable, 256, buf, buf_len);
 
-	dump_symtable(state.symtable, 256);
+	size_t bytes_read = 0;
+	while (!feof(f) && !ferror(f)) {
+		size_t buf_len = fread(buf, 1, sizeof(buf), f);
+		huff_update_symtable(state.symtable, 256, buf, buf_len);
+		bytes_read += buf_len;
+	}
+	fclose(f);
+	printf("%zu bytes in input.\n", bytes_read);
 
-	huff_build_tree(&state, buf, buf_len);
+	dump_symtable(state.symtable, 256, 0);
+
+	huff_sort_symtable(state.symtable, 256);
+	// TODO: safety: if debug, verify sort.
+
+	dump_symtable(state.symtable, 256, 1);
+
+	huff_build_tree(&state);
 
 	return 0;
 }
