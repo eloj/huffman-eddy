@@ -2,16 +2,17 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 struct symcnt_t {
 	size_t cnt;
-	uint8_t sym;
+	uint8_t sym; // TODO: should be removed, rework sort.
 };
 
 struct symnode_t {
 	size_t cnt;
 	uint8_t sym;
-	uint8_t left,right; // isleaf(symnode_t node) { return (node.left == node.right); }
+	uint16_t left,right; // isleaf(symnode_t node) { return (node.left == node.right); }
 };
 
 struct huffman_state {
@@ -67,30 +68,138 @@ static void huff_init(struct huffman_state *state) {
 	huff_init_symtable(state->symtable, 256);
 }
 
-static void huff_build_tree(struct huffman_state *state) {
+typedef size_t qitem_t;
 
-#if 0
-	queue 1 <- original symtable, sorted lowest count to highest (ignore zero cnt)
-	queue 2 <- start empty, nodes (n1.cnt+n2.cnt /w left/right) go to end here.
-	pull lowest two nodes, until one node on q2, which is the root.
-		"break ties between queues by choosing the item in the first queue"
+struct queue {
+	qitem_t q[256];
+	size_t head, tail;
+};
 
-	queue 1 can just be the original symtable sorted, index advanced over zero counts, then
-	advanced until last entry. Initial sort required, then just index advancement.
-	(de)que 2 must take nodes, which can be leaves (q1) or previous nodes.
-
-	cold storage array for q2 nodes? Need at most |symbols|-1 .
-
-	if we have cold-storage, then the dequeue is simply an array if indexes into it.
-
-	step 1: sort queue 1 into cold storage to unify node structure?
-#endif
-
-
-
+static int queue_isempty(struct queue *q) {
+	return q->tail == q->head;
 }
 
+static int queue_isfull(struct queue *q) {
+	return q->tail == 256;
+}
 
+static void queue_dump(struct queue *q) {
+	printf("Dumping queue @ %p (.head=%d, .tail=%d, isempty:%d, isfull:%d):\n", q, (int)q->head, (int)q->tail, queue_isempty(q), queue_isfull(q));
+	for (size_t i=q->head ; i < q->tail ; ++i) {
+		printf("[%03d] item %zu\n", (int)i, q->q[i]);
+	}
+
+};
+
+static qitem_t queue_peek(struct queue *q, int *error) {
+	if (*error || queue_isempty(q)) {
+		*error = 1;
+		return (qitem_t)0;
+	}
+	return q->q[q->head];
+}
+
+static void queue_push(struct queue *q, qitem_t item) {
+	assert(!queue_isfull(q));
+	q->q[q->tail++] = item;
+}
+
+static qitem_t queue_pop(struct queue *q) {
+	assert(!queue_isempty(q));
+	qitem_t res = q->q[q->head++];
+	return res;
+}
+
+static void huff_build_tree(struct huffman_state *state) {
+	// todo: downsize types
+	printf("sizeof(symnode_t)=%zu, sizeof(symcnt_t)=%zu\n", sizeof(struct symnode_t), sizeof(struct symcnt_t));
+
+	struct queue q1 = { 0 };
+	struct queue q2 = { 0 };
+
+	struct symnode_t symstore[512];
+	size_t sympos = 0;
+
+	// Copy leaf nodes into storage and queue 1. TODO: this should be the sort step (remove .sym from symtable)
+	for (size_t i=0 ; i < 256 ; ++i) {
+		if (state->symtable[i].cnt > 0) {
+			symstore[sympos] = (struct symnode_t){
+				.cnt = state->symtable[i].cnt,
+				.sym = state->symtable[i].sym,
+				.left = 0,
+				.right = 0
+			};
+			queue_push(&q1, sympos++);
+		}
+	}
+	size_t num_syms = sympos;
+	printf("%zu symbols in store.\n", num_syms);
+	queue_dump(&q1);
+	queue_dump(&q2);
+
+	int done = 0;
+	while (!done) {
+		qitem_t item1, item2;
+		// item1 = pop min(q1,q2),min(q1,q2)
+		if (queue_isempty(&q1))
+			item1 = queue_pop(&q2);
+		else if (queue_isempty(&q2))
+			item1 = queue_pop(&q1);
+		else {
+			int err = 0;
+			qitem_t t1 = queue_peek(&q1, &err);
+			qitem_t t2 = queue_peek(&q2, &err);
+			if (symstore[t1].cnt <= symstore[t2].cnt)
+				item1 = queue_pop(&q1);
+			else
+				item1 = queue_pop(&q2);
+		}
+		// item2 = pop min(q1,q2),min(q1,q2)
+		if (queue_isempty(&q1))
+			item2 = queue_pop(&q2);
+		else if (queue_isempty(&q2))
+			item2 = queue_pop(&q1);
+		else {
+			int err = 0;
+			qitem_t t1 = queue_peek(&q1, &err);
+			qitem_t t2 = queue_peek(&q2, &err);
+			if (symstore[t1].cnt <= symstore[t2].cnt)
+				item2 = queue_pop(&q1);
+			else
+				item2 = queue_pop(&q2);
+		}
+		printf("item1=%d\n", (int)item1);
+		printf("item2=%d\n", (int)item2);
+
+		symstore[sympos] = (struct symnode_t){
+			.cnt = symstore[item1].cnt + symstore[item2].cnt,
+			.sym = 0,
+			.left = item1,
+			.right = item2
+		};
+		queue_push(&q2, sympos++);
+
+		done = queue_isempty(&q1) && q2.head + 1 == q2.tail;
+	}
+	qitem_t root = queue_pop(&q2);
+	printf("Root node = %d\n", (int)root);
+	printf("final state:\n");
+	queue_dump(&q1);
+	queue_dump(&q2);
+	assert(queue_isempty(&q1));
+	assert(queue_isempty(&q2));
+
+	for (size_t i=0 ; i < sympos ; ++i) {
+		struct symnode_t *node = &symstore[i];
+		if (node->left == node->right) {
+			printf("[%03d] (LEAF) sym='%c'(%d), cnt=%d\n", (int)i, node->sym, node->sym, (int)node->cnt);
+		} else {
+			printf("[%03d] (INT.) cnt=%d, left=%c%d, right=%c%d\n", (int)i, (int)node->cnt, (int)node->left < num_syms ? '*' : ' ', (int)node->left, (int)node->right < num_syms ? '*' : ' ', (int)node->right);
+		}
+
+	}
+
+}
 
 int main(int argc, char *argv[]) {
 	const char *infile = argc > 1 ? argv[1] : "input.txt";
@@ -110,11 +219,12 @@ int main(int argc, char *argv[]) {
 		size_t buf_len = fread(buf, 1, sizeof(buf), f);
 		huff_update_symtable(state.symtable, 256, buf, buf_len);
 		bytes_read += buf_len;
+		break;
 	}
 	fclose(f);
 	printf("%zu bytes in input.\n", bytes_read);
 
-	dump_symtable(state.symtable, 256, 0);
+	// dump_symtable(state.symtable, 256, 0);
 
 	huff_sort_symtable(state.symtable, 256);
 	// TODO: safety: if debug, verify sort.
