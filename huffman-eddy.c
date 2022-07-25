@@ -5,7 +5,9 @@
 #include <assert.h>
 /*
 	TODO:
+	* Fix dummy-node/1-symbol hackery.
 	* Replace q1 with pulling directly from the symstore.
+	* Check for overflow in .cnt when building internal nodes
 
 */
 
@@ -26,14 +28,16 @@ struct symnode_t {
 // static_assert(sizeof(struct symnode_t) == 8, "Unexpected symnode_t size");
 
 struct hufcode_t {
-	uint32_t code;
+	uint16_t code;
 	uint8_t sym;
 	uint8_t nbits;
 };
 
 struct huffman_state {
 
-	struct hufcode_t codebook[512];
+	// TODO: map codebook by symbol, add bitmap for iteration?
+	uint16_t num_codes;
+	struct hufcode_t codebook[256]; // initially NOT mapped by symbol!
 	size_t counts[256]; // temp
 };
 
@@ -109,8 +113,55 @@ static void sort_symnodes(struct symnode_t *arr, size_t n) {
 	}
 }
 
+static void huff_build_code_helper(struct huffman_state *state, struct symnode_t *tree, qitem_t root, uint16_t code, int codelen) {
+	struct symnode_t *node = &tree[root];
+
+	if (node->left == node->right) {
+		// printf("[%02x/%d] (LEAF) sym='%c'(%d), cnt=%d\n", code, codelen, node->sym, node->sym, (int)node->cnt);
+		state->codebook[state->num_codes++] = (struct hufcode_t){
+			.code = code,
+			.sym = node->sym,
+			.nbits = codelen
+		};
+	} else {
+		// printf("[%02x/%d] (INT.) cnt=%d, left=%d, right=%d\n", code, codelen, (int)node->cnt, (int)node->left, (int)node->right);
+		// TODO: CRASH: need to check if subtree is dummy node. This is too hacky.
+		if (node->left < 512)
+			huff_build_code_helper(state, tree, node->left,  (code << 1) | 0, codelen + 1);
+		if (node->right < 512)
+			huff_build_code_helper(state, tree, node->right, (code << 1) | 1, codelen + 1);
+	}
+
+}
+
+static void huff_build_code(struct huffman_state *state, struct symnode_t *tree, qitem_t rootidx) {
+	printf("Building Huffman code.\n");
+
+	int codelen = 0;
+	uint16_t code = 0;
+	state->num_codes = 0;
+	huff_build_code_helper(state, tree, rootidx, code, codelen);
+
+	printf("Huffman codebook (n=%d):\n", (int)state->num_codes);
+
+	for (size_t i = 0 ; i < state->num_codes ; ++i) {
+		struct hufcode_t entry = state->codebook[i];
+		printf("[%03d] sym=%d, nbits=%d, code=(%04x): ", (int)i, entry.sym, entry.nbits, entry.code);
+		for (int b = entry.nbits ; b > 0 ; --b) {
+			if (entry.code & (1L << (b-1)))
+				printf("1");
+			else
+				printf("0");
+		}
+
+		printf("\n");
+	}
+
+}
+
 static void huff_build_tree(struct huffman_state *state) {
 	// todo: downsize types
+	printf("Building Huffman tree.\n");
 	printf("sizeof(symnode_t)=%zu\n", sizeof(struct symnode_t));
 
 	struct queue q1 = { 0 };
@@ -159,8 +210,9 @@ static void huff_build_tree(struct huffman_state *state) {
 		// printf("item1=%d\n", (int)item1);
 		// printf("item2=%d\n", (int)item2);
 
+		// TODO: CRASH: need to check if subtree is dummy node. This is too hacky.
 		symstore[num_nodes] = (struct symnode_t){
-			.cnt = symstore[item1].cnt + symstore[item2].cnt,
+			.cnt = symstore[item1].cnt + (item2 == default_item ? 0 : symstore[item2].cnt),
 			.sym = 0,
 			.left = item1,
 			.right = item2,
@@ -190,7 +242,7 @@ static void huff_build_tree(struct huffman_state *state) {
 
 	// TODO: walk tree and generate codebook
 	// struct hufcode_t codebook[512];
-	
+	huff_build_code(state, symstore, root);
 
 }
 
