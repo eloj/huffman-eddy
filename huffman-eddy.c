@@ -8,7 +8,12 @@
 	* Fix dummy-node/1-symbol hackery.
 	* Replace q1 with pulling directly from the symstore.
 	* Check for overflow in .cnt when building internal nodes
-
+	** Counts should probably be limited to uint32_t ...
+	* Experiment with codebook serialization/reconstruction:
+	** From syms + count-per-bitlength (as JPEG).
+	** From bitlengths only (with zeros for unused syms)
+	** Write out both variants as 'detached' files in the encoder.
+	* Function to get memory reqs for queues based on symbol count.
 */
 
 struct symnode_t {
@@ -25,23 +30,25 @@ struct symnode_t {
 #endif
 };
 
-// static_assert(sizeof(struct symnode_t) == 8, "Unexpected symnode_t size");
 
 struct hufcode_t {
 	uint16_t code;
-	uint8_t sym;
 	uint8_t nbits;
+	uint8_t sym;
 };
 
-struct huffman_state {
+static_assert(sizeof(struct symnode_t) == 8, "Unexpected symnode_t size");
+static_assert(sizeof(struct hufcode_t) == 4, "Unexpected hufcode_t size");
 
+struct huffman_state {
 	// TODO: map codebook by symbol, add bitmap for iteration?
+	uint8_t num_groups;
 	uint16_t num_codes;
 	struct hufcode_t codebook[256]; // initially NOT mapped by symbol!
-	size_t counts[256]; // temp
 };
 
 static void huff_init(struct huffman_state *state) {
+	// Maybe we'll get away with zero-init and not need this.
 }
 
 typedef uint16_t qitem_t;
@@ -102,7 +109,6 @@ static qitem_t pop_min(struct queue *q1, struct queue *q2, struct symnode_t *sym
 	return item;
 }
 
-
 static void sort_symnodes(struct symnode_t *arr, size_t n) {
 	struct symnode_t x;
 	// isort3
@@ -136,8 +142,8 @@ static void sort_codebook(struct hufcode_t *arr, size_t n) {
 	}
 }
 
-static void huff_build_code_helper(struct huffman_state *state, struct symnode_t *tree, qitem_t root, uint16_t code, int codelen) {
-	struct symnode_t *node = &tree[root];
+static void build_code_helper(struct huffman_state *state, struct symnode_t *tree, qitem_t root, uint16_t code, int codelen) {
+	const struct symnode_t *node = &tree[root];
 
 	if (node->left == node->right) {
 		// printf("[%02x/%d] (LEAF) sym='%c'(%d), cnt=%d\n", code, codelen, node->sym, node->sym, (int)node->cnt);
@@ -150,24 +156,23 @@ static void huff_build_code_helper(struct huffman_state *state, struct symnode_t
 		// printf("[%02x/%d] (INT.) cnt=%d, left=%d, right=%d\n", code, codelen, (int)node->cnt, (int)node->left, (int)node->right);
 		// TODO: CRASH: need to check if subtree is dummy node. This is too hacky.
 		if (node->left < 512)
-			huff_build_code_helper(state, tree, node->left,  (code << 1) | 0, codelen + 1);
+			build_code_helper(state, tree, node->left,  (code << 1) | 0, codelen + 1);
 		if (node->right < 512)
-			huff_build_code_helper(state, tree, node->right, (code << 1) | 1, codelen + 1);
+			build_code_helper(state, tree, node->right, (code << 1) | 1, codelen + 1);
 	}
 
 }
 
-static void huff_build_code(struct huffman_state *state, struct symnode_t *tree, qitem_t rootidx) {
+static void huff_build_code(struct huffman_state *state, struct symnode_t *tree, qitem_t root) {
 	printf("Building Huffman code.\n");
 
 	int codelen = 0;
 	uint16_t code = 0;
 	state->num_codes = 0;
-	huff_build_code_helper(state, tree, rootidx, code, codelen);
-
+	build_code_helper(state, tree, root, code, codelen);
 }
 
-static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *symstore) {
+static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *symstore, size_t *counts) {
 	printf("Building Huffman tree.\n");
 	printf("sizeof(symnode_t)=%zu\n", sizeof(struct symnode_t));
 
@@ -182,9 +187,9 @@ static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *sy
 
 	// Generate leaf nodes in storage array.
 	for (size_t i = 0 ; i < 256 ; ++i) {
-		if (state->counts[i] > 0) {
+		if (counts[i] > 0) {
 			symstore[num_nodes] = (struct symnode_t){
-				.cnt = state->counts[i],
+				.cnt = counts[i],
 				.sym = i,
 				.left = 0,
 				.right = 0
@@ -229,21 +234,23 @@ static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *sy
 	assert(queue_isempty(&q1));
 	assert(queue_isempty(&q2));
 
+#if DEBUG
 	for (size_t i = 0 ; i < num_nodes ; ++i) {
 		struct symnode_t *node = &symstore[i];
 
 		if (node->left == node->right) {
-			printf("[%03d] (LEAF) sym='%c'(%d), cnt=%d\n", (int)i, node->sym, node->sym, (int)node->cnt);
+			printf("[%03d] (LEAF) sym='%c'(%d), cnt=%d\n", (int)i, (node->sym < 127 && node->sym > 31) ? node->sym : '?', node->sym, (int)node->cnt);
 		} else {
 			printf("[%03d] (%s) cnt=%d, left=%c%d, right=%c%d\n", (int)i, i+1 == num_nodes ? "ROOT" : "INT.", (int)node->cnt, (int)node->left < num_syms ? '*' : ' ', (int)node->left, (int)node->right < num_syms ? '*' : ' ', (int)node->right);
 		}
 	}
+#endif
 
 	return root;
 }
 
 static void dump_codebook(struct huffman_state *state) {
-	printf("Huffman codebook (n=%d):\n", (int)state->num_codes);
+	printf("Huffman codebook (n=%d, groups=%d):\n", (int)state->num_codes, (int)state->num_groups);
 
 	for (size_t i = 0 ; i < state->num_codes ; ++i) {
 		struct hufcode_t entry = state->codebook[i];
@@ -263,27 +270,33 @@ static void huff_build_canonical(struct huffman_state *state) {
 
 	// Sort by bit-length,symbol
 	sort_codebook(state->codebook, state->num_codes);
+	int i;
 
-	for (int i = 1 ; i < state->num_codes ; ++i) {
+#if DEBUG
+	for (i = 1 ; i < state->num_codes ; ++i) {
 		assert(state->codebook[i-1].nbits <= state->codebook[i].nbits);
 		assert((state->codebook[i-1].nbits != state->codebook[i].nbits) ||
 			((state->codebook[i-1].nbits == state->codebook[i].nbits) && (state->codebook[i-1].sym < state->codebook[i].sym)));
 	}
+#endif
 
+	state->num_groups = 1;
 	uint16_t code = 0;
-	int i = 0;
 	for (i = 0 ; i < state->num_codes - 1 ; ++i) {
 		state->codebook[i].code = code;
-		code = (code + 1) << (state->codebook[i+1].nbits - state->codebook[i].nbits);
+		int step = state->codebook[i+1].nbits - state->codebook[i].nbits;
+		code = (code + 1) << step;
+		if (step)
+			++state->num_groups;
 	}
 	state->codebook[i].code = code;
 }
 
-static void huff_build(struct huffman_state *state) {
+static void huff_build(struct huffman_state *state, size_t *counts) {
 	struct symnode_t symstore[512];
 
 	// TODO: pass in length of symstore so we can assert on OOB.
-	qitem_t root = huff_build_tree(state, symstore);
+	qitem_t root = huff_build_tree(state, symstore, counts);
 	printf("Root node = %d\n", (int)root);
 	huff_build_code(state, symstore, root);
 	// dump_codebook(state);
@@ -291,14 +304,100 @@ static void huff_build(struct huffman_state *state) {
 	dump_codebook(state);
 }
 
-static void update_counts8(size_t *counts, uint8_t *input, size_t len) {
+static void count_symbols(size_t *counts, uint8_t *input, size_t len) {
 	for (size_t i = 0 ; i < len ; ++i) {
 		++counts[input[i]];
 	}
 }
+static int write_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t num_groups, const char *outfile) {
+
+	FILE *f = fopen(outfile, "wb");
+	if (!f) {
+		fprintf(stderr, "Couldn't open output file '%s'.\n", outfile);
+		return 1;
+	}
+
+	size_t codebook_size = 1 + num_groups + len;
+	printf("Calculated codebook size=%zu bytes.\n", codebook_size);
+
+	uint8_t b = num_groups << 4 | codebook[0].nbits;
+	fwrite(&b, 1, 1, f);
+
+	b = 1;
+	for (size_t i = 0 ; i < len - 1 ; ++i) {
+		if (codebook[i].nbits != codebook[i+1].nbits) {
+			fwrite(&b, 1, 1, f);
+			b = 0;
+		}
+		++b;
+	}
+	if (b)
+		fwrite(&b, 1, 1, f);
+	for (size_t i = 0 ; i < len ; ++i) {
+		b = codebook[i].sym;
+		fwrite(&b, 1, 1, f);
+	}
+
+	fclose(f);
+
+	return 0;
+}
+
+static int encode_file(const struct huffman_state *state, const char *infile, const char *outfile) {
+	uint8_t buf[1024];
+
+	FILE *f = fopen(infile, "rb");
+	if (!f) {
+		fprintf(stderr, "Couldn't open input file '%s'.\n", infile);
+		return 1;
+	}
+	FILE *fout = fopen(outfile, "wb");
+	if (!fout) {
+		fclose(f);
+		fprintf(stderr, "Couldn't open output file '%s'.\n", infile);
+		return 1;
+	}
+
+	printf("Compressing '%s' to '%s'\n", infile, outfile);
+
+	// TODO: Should be able to do this in-place effectively? A type of redistribution/sort.
+	struct hufcode_t codebook[256] = { 0 };
+	for (size_t i = 0 ; i < state->num_codes ; ++i) {
+		codebook[state->codebook[i].sym] = state->codebook[i];
+	}
+
+	write_codebook1(state->codebook, state->num_codes, state->num_groups, "codebook1.huff");
+
+	size_t bytes_read = 0;
+	size_t bits_written = 0;
+	while (!feof(f) && !ferror(f)) {
+		size_t buf_len = fread(buf, 1, sizeof(buf), f);
+
+		for (size_t i = 0 ; i < buf_len ; ++i) {
+			unsigned char ch = buf[i];
+
+			if (codebook[ch].nbits != 0) {
+				// printf("%02x -> %d\n", ch, codebook[ch].nbits);
+
+				// TODO: write .nbits of .code to output
+
+				bits_written += codebook[ch].nbits;
+			} else {
+				printf("ERROR: Invalid symbol in input; no code defined for symbol %d.\n", (int)ch);
+			}
+		}
+		bytes_read += buf_len;
+	}
+	fclose(f);
+	fclose(fout);
+	printf("%zu bits (%zu bytes) in output.\n", bits_written, 1+(bits_written/8));
+
+	return 0;
+}
 
 int main(int argc, char *argv[]) {
 	const char *infile = argc > 1 ? argv[1] : "tests/input-wp.txt";
+	const char *outfile = "output.huff";
 	uint8_t buf[1024];
 
 	FILE *f = fopen(infile, "rb");
@@ -307,20 +406,25 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-	struct huffman_state state = { 0 };
-	huff_init(&state);
+	size_t counts[256] = { 0 };
 
 	size_t bytes_read = 0;
 	while (!feof(f) && !ferror(f)) {
 		size_t buf_len = fread(buf, 1, sizeof(buf), f);
-		update_counts8(state.counts, buf, buf_len);
+		count_symbols(counts, buf, buf_len);
 		bytes_read += buf_len;
 		// break;
 	}
 	fclose(f);
 	printf("%zu bytes in input.\n", bytes_read);
 
-	huff_build(&state);
+	struct huffman_state state = { 0 };
+	huff_init(&state);
+	huff_build(&state, counts);
+
+	encode_file(&state, infile, outfile);
+	// TODO: encode using state. state should be const! or we need to break out const vs dynamic state.
+	//huff_encode(&state, src, slen, dest, dlen)
 
 	return 0;
 }
