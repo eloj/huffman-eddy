@@ -30,9 +30,10 @@ struct symnode_t {
 #endif
 };
 
+typedef uint_fast16_t code_t;
 
 struct hufcode_t {
-	uint16_t code;
+	uint16_t code;	// code_t
 	uint8_t nbits;
 	uint8_t sym;
 };
@@ -97,6 +98,7 @@ static qitem_t pop_min(struct queue *q1, struct queue *q2, struct symnode_t *sym
 	if (!queue_isempty(q1) && !queue_isempty(q2)){
 		qitem_t t1 = queue_peek(q1);
 		qitem_t t2 = queue_peek(q2);
+		// "To minimize variance, simply break ties between queues by choosing the item in the first queue."
 		item = queue_pop(symstore[t1].cnt <= symstore[t2].cnt ? q1 : q2);
 	} else if (!queue_isempty(q1)) {
 		item = queue_pop(q1);
@@ -142,10 +144,11 @@ static void sort_codebook(struct hufcode_t *arr, size_t n) {
 	}
 }
 
-static void build_code_helper(struct huffman_state *state, struct symnode_t *tree, qitem_t root, uint16_t code, int codelen) {
+static void build_code_helper(struct huffman_state *state, struct symnode_t *tree, qitem_t root, uint_fast16_t code, uint_fast8_t codelen) {
 	const struct symnode_t *node = &tree[root];
 
 	if (node->left == node->right) {
+		assert(codelen <= sizeof(state->codebook[0].code)*8);
 		// printf("[%02x/%d] (LEAF) sym='%c'(%d), cnt=%d\n", code, codelen, node->sym, node->sym, (int)node->cnt);
 		state->codebook[state->num_codes++] = (struct hufcode_t){
 			.code = code,
@@ -167,7 +170,7 @@ static void huff_build_code(struct huffman_state *state, struct symnode_t *tree,
 	printf("Building Huffman code.\n");
 
 	int codelen = 0;
-	uint16_t code = 0;
+	code_t code = 0;
 	state->num_codes = 0;
 	build_code_helper(state, tree, root, code, codelen);
 }
@@ -280,16 +283,28 @@ static void huff_build_canonical(struct huffman_state *state) {
 	}
 #endif
 
-	state->num_groups = 1;
-	uint16_t code = 0;
-	for (i = 0 ; i < state->num_codes - 1 ; ++i) {
-		state->codebook[i].code = code;
-		int step = state->codebook[i+1].nbits - state->codebook[i].nbits;
+	state->num_groups = 1 + state->codebook[state->num_codes - 1].nbits - state->codebook[0].nbits;
+	code_t code = 0;
+	for (i = 1 ; i < state->num_codes ; ++i) {
+		state->codebook[i-1].code = code;
+		int step = state->codebook[i].nbits - state->codebook[i-1].nbits;
+		assert(step >= 0);
 		code = (code + 1) << step;
-		if (step)
-			++state->num_groups;
 	}
-	state->codebook[i].code = code;
+	state->codebook[i-1].code = code;
+
+#if DEBUG
+	printf("Verifying canonical codes strictly incrementing.\n");
+	for (i = 0 ; i < state->num_codes - 1 ; ++i) {
+		code_t mask1 = (1U << state->codebook[i].nbits) - 1;
+		code_t mask2 = (1U << state->codebook[i+1].nbits) - 1;
+		code_t c1 = state->codebook[i].code & mask1;
+		code_t c2 = state->codebook[i+1].code & mask2;
+		// printf("%d:%04x < %04x ; ", i, c1, c2); fflush(stdout);
+		assert(c1 < c2);
+	}
+#endif
+
 }
 
 static void huff_build(struct huffman_state *state, size_t *counts) {
@@ -323,16 +338,28 @@ static int write_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t
 	uint8_t b = num_groups << 4 | codebook[0].nbits;
 	fwrite(&b, 1, 1, f);
 
-	b = 1;
-	for (size_t i = 0 ; i < len - 1 ; ++i) {
-		if (codebook[i].nbits != codebook[i+1].nbits) {
+	// XXX: bugged
+	b = 0;
+	int prevbits = codebook[0].nbits;
+	for (size_t i = 0 ; i < len ; ++i) {
+		if (codebook[i].nbits != prevbits) {
+			int num_skip = codebook[i].nbits - prevbits;
 			fwrite(&b, 1, 1, f);
 			b = 0;
+			for (int j=1 ; j < num_skip ; ++j) {
+				printf("XXX: adding zero group at %d\n", (int)i);
+				fwrite(&b, 1, 1, f);
+			}
+			prevbits = codebook[i].nbits;
+			b = 1;
+		} else {
+			++b;
 		}
-		++b;
 	}
-	if (b)
+	if (b) {
 		fwrite(&b, 1, 1, f);
+	}
+
 	for (size_t i = 0 ; i < len ; ++i) {
 		b = codebook[i].sym;
 		fwrite(&b, 1, 1, f);
@@ -341,6 +368,42 @@ static int write_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t
 	fclose(f);
 
 	return 0;
+}
+
+static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct hufcode_t *codebook, size_t len, int dist) {
+	// NOTE: Can't use buf_len to deduce layout/size.
+	uint8_t num_groups = buf[0] >> 4;
+	uint8_t min_bits = buf[0] & 0x0F;
+
+#if 0
+	size_t num_codes = 0;
+	for (unsigned int i = 0 ; i < num_groups ; ++i) {
+		num_codes += buf[1+i];
+	}
+#endif
+	printf("Reconstructing codebook1 (num_groups=%d, min_bits=%d, num_codes=?):\n", (int)num_groups, (int)min_bits);
+
+	uint8_t sym_idx = 1 + num_groups;
+	uint8_t codelen = min_bits;
+	code_t code = 0;
+	unsigned int idx = 0;
+	for (unsigned int i = 0 ; i < num_groups ; ++i) {
+		assert(idx < len);
+		int sym_cnt = buf[1 + i];
+		printf("symbol count[%d]=%d, code=%04x, codelen=%d\n", i, sym_cnt, (int)code, codelen);
+		while (sym_cnt--) {
+			codebook[idx] = (struct hufcode_t){
+				.code = code,
+				.sym = buf[idx + sym_idx],
+				.nbits = codelen
+			};
+			++code;
+			++idx;
+		}
+		code <<= 1;
+		++codelen;
+	}
+	return idx;
 }
 
 static int encode_file(const struct huffman_state *state, const char *infile, const char *outfile) {
@@ -367,6 +430,35 @@ static int encode_file(const struct huffman_state *state, const char *infile, co
 	}
 
 	write_codebook1(state->codebook, state->num_codes, state->num_groups, "codebook1.huff");
+
+#if DEBUG
+{
+	// Read codebook back
+	FILE *fbook = fopen("codebook1.huff", "rb");
+	size_t buf_len = fread(buf, 1, sizeof(buf), fbook);
+	fclose(fbook);
+	// Reconstruct
+	struct hufcode_t reconstructed_codebook[256] = { 0 };
+	size_t rsyms = reconstruct_codebook1(buf, buf_len, reconstructed_codebook, 256, 0);
+	assert(rsyms == state->num_codes);
+
+	// Verify
+	for (size_t i = 0 ; i < rsyms ; ++i) {
+		struct hufcode_t oentry = state->codebook[i];
+		struct hufcode_t rentry = reconstructed_codebook[i];
+#if 0
+		printf("%d == %d; ", (int)oentry.sym, (int)rentry.sym);
+		printf("%d == %d; ", (int)oentry.nbits, (int)rentry.nbits);
+		printf("%04x == %04x\n", (int)oentry.code, (int)rentry.code);
+#endif
+		assert(oentry.sym == rentry.sym);
+		assert(oentry.nbits == rentry.nbits);
+		assert(oentry.code == rentry.code);
+	}
+	printf("Reconstruction verified.\n");
+}
+#endif
+
 
 	size_t bytes_read = 0;
 	size_t bits_written = 0;
