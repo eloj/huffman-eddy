@@ -50,6 +50,9 @@ build_const.h: FORCE
 huffman-eddy: huffman-eddy.c build_const.h
 	$(CC) $(CFLAGS) $< -o $@
 
+test: huffman-eddy
+	${TEST_PREFIX} ./huffman-eddy
+
 backup:
 	@echo -e $(YELLOW)Making backup$(NC)
 	tar -cJf ../$(notdir $(CURDIR))-`date +"%Y-%m"`.tar.xz ../$(notdir $(CURDIR))
