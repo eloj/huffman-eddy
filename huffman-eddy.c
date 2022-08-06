@@ -8,9 +8,7 @@
 	* Fix dummy-node/1-symbol hackery.
 	* Replace q1 with pulling directly from the symstore.
 	* Check for overflow in .cnt when building internal nodes
-	** Counts should probably be limited to uint32_t ...
 	* Experiment with codebook serialization/reconstruction:
-	** From syms + count-per-bitlength (as JPEG).
 	** From bitlengths only (with zeros for unused syms)
 	** Write out both variants as 'detached' files in the encoder.
 	* Function to get memory reqs for queues based on symbol count.
@@ -59,14 +57,6 @@ struct queue {
 	size_t head, tail;
 };
 
-static inline int queue_isempty(struct queue *q) {
-	return q->tail == q->head;
-}
-
-static inline int queue_isfull(struct queue *q) {
-	return q->tail == 256;
-}
-
 #if 0
 static void queue_dump(struct queue *q) {
 	printf("Dumping queue @ %p (.head=%d, .tail=%d, isempty:%d, isfull:%d):\n", q, (int)q->head, (int)q->tail, queue_isempty(q), queue_isfull(q));
@@ -75,6 +65,14 @@ static void queue_dump(struct queue *q) {
 	}
 };
 #endif
+
+static inline int queue_isempty(struct queue *q) {
+	return q->tail == q->head;
+}
+
+static inline int queue_isfull(struct queue *q) {
+	return q->tail == 256;
+}
 
 static inline qitem_t queue_peek(struct queue *q) {
 	return q->q[q->head];
@@ -252,19 +250,21 @@ static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *sy
 	return root;
 }
 
-static void dump_codebook(struct huffman_state *state) {
-	printf("Huffman codebook (n=%d, groups=%d):\n", (int)state->num_codes, (int)state->num_groups);
+static void dump_codebook(const struct hufcode_t *codebook, size_t num_codes, int hide_unused) {
+	printf("Dumping Huffman codebook (n=%d):\n", (int)num_codes);
 
-	for (size_t i = 0 ; i < state->num_codes ; ++i) {
-		struct hufcode_t entry = state->codebook[i];
-		printf("[%03d] sym=%3d, nbits=%2d, code=(%04x): ", (int)i, entry.sym, entry.nbits, entry.code);
-		for (int b = entry.nbits ; b > 0 ; --b) {
-			if (entry.code & (1L << (b-1)))
-				printf("1");
-			else
-				printf("0");
+	for (size_t i = 0 ; i < num_codes ; ++i) {
+		struct hufcode_t entry = codebook[i];
+		if (entry.nbits > 0 || !hide_unused) {
+			printf("[%03d] sym=%3d, nbits=%2d, code=(%04x): ", (int)i, entry.sym, entry.nbits, entry.code);
+			for (int b = entry.nbits ; b > 0 ; --b) {
+				if (entry.code & (1L << (b-1)))
+					printf("1");
+				else
+					printf("0");
+			}
+			printf("\n");
 		}
-		printf("\n");
 	}
 }
 
@@ -316,14 +316,15 @@ static void huff_build(struct huffman_state *state, size_t *counts) {
 	huff_build_code(state, symstore, root);
 	// dump_codebook(state);
 	huff_build_canonical(state);
-	dump_codebook(state);
+	dump_codebook(state->codebook, state->num_codes, 0);
 }
 
-static void count_symbols(size_t *counts, uint8_t *input, size_t len) {
+static inline void count_symbols(size_t *counts, uint8_t *input, size_t len) {
 	for (size_t i = 0 ; i < len ; ++i) {
 		++counts[input[i]];
 	}
 }
+
 static int write_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t num_groups, const char *outfile) {
 
 	FILE *f = fopen(outfile, "wb");
@@ -338,7 +339,7 @@ static int write_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t
 	uint8_t b = num_groups << 4 | codebook[0].nbits;
 	fwrite(&b, 1, 1, f);
 
-	// XXX: bugged
+	// XXX: bugged. Do this to memory buffer instead.
 	b = 0;
 	int prevbits = codebook[0].nbits;
 	for (size_t i = 0 ; i < len ; ++i) {
@@ -370,7 +371,7 @@ static int write_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t
 	return 0;
 }
 
-static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct hufcode_t *codebook, size_t len, int dist) {
+static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct hufcode_t *codebook, size_t len) {
 	// NOTE: Can't use buf_len to deduce layout/size.
 	uint8_t num_groups = buf[0] >> 4;
 	uint8_t min_bits = buf[0] & 0x0F;
@@ -392,9 +393,11 @@ static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct h
 		int sym_cnt = buf[1 + i];
 		printf("symbol count[%d]=%d, code=%04x, codelen=%d\n", i, sym_cnt, (int)code, codelen);
 		while (sym_cnt--) {
+			assert(idx + sym_idx < buf_len);
+			unsigned int sym = buf[idx + sym_idx];
 			codebook[idx] = (struct hufcode_t){
 				.code = code,
-				.sym = buf[idx + sym_idx],
+				.sym = sym,
 				.nbits = codelen
 			};
 			++code;
@@ -406,7 +409,30 @@ static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct h
 	return idx;
 }
 
-static int encode_file(const struct huffman_state *state, const char *infile, const char *outfile) {
+// XXX: A simple/slow/temporary direct-to-file bit encoder for testing.
+static void output_bits_f(FILE *f, code_t code, uint8_t nbits, int flush) {
+	static uint32_t reservoir = 0;
+	static uint32_t reslen = 0;
+
+	reservoir = ((reservoir << nbits) | code);
+	reslen += nbits;
+
+	// printf("%d\n", (int)reslen);
+
+	while (reslen > 8) {
+		uint8_t b = reservoir >> (reslen - 8);
+		fputc(b, f);
+		reslen -= 8;
+	}
+
+	if (flush) {
+		uint8_t b = reservoir << (8 - reslen);
+		fputc(b, f);
+	}
+
+}
+
+static int encode_file_slow(const struct huffman_state *state, const char *infile, const char *outfile) {
 	uint8_t buf[1024];
 
 	FILE *f = fopen(infile, "rb");
@@ -439,7 +465,8 @@ static int encode_file(const struct huffman_state *state, const char *infile, co
 	fclose(fbook);
 	// Reconstruct
 	struct hufcode_t reconstructed_codebook[256] = { 0 };
-	size_t rsyms = reconstruct_codebook1(buf, buf_len, reconstructed_codebook, 256, 0);
+	printf("Read %zu bytes of codebook.\n", buf_len);
+	size_t rsyms = reconstruct_codebook1(buf, buf_len, reconstructed_codebook, 256);
 	assert(rsyms == state->num_codes);
 
 	// Verify
@@ -459,7 +486,6 @@ static int encode_file(const struct huffman_state *state, const char *infile, co
 }
 #endif
 
-
 	size_t bytes_read = 0;
 	size_t bits_written = 0;
 	while (!feof(f) && !ferror(f)) {
@@ -471,7 +497,7 @@ static int encode_file(const struct huffman_state *state, const char *infile, co
 			if (codebook[ch].nbits != 0) {
 				// printf("%02x -> %d\n", ch, codebook[ch].nbits);
 
-				// TODO: write .nbits of .code to output
+				output_bits_f(fout, codebook[ch].code, codebook[ch].nbits, 0);
 
 				bits_written += codebook[ch].nbits;
 			} else {
@@ -480,6 +506,7 @@ static int encode_file(const struct huffman_state *state, const char *infile, co
 		}
 		bytes_read += buf_len;
 	}
+	output_bits_f(fout, 0, 0, 1);
 	fclose(f);
 	fclose(fout);
 	printf("%zu bits (%zu bytes) in output.\n", bits_written, 1+(bits_written/8));
@@ -487,36 +514,73 @@ static int encode_file(const struct huffman_state *state, const char *infile, co
 	return 0;
 }
 
+static void huff_generate_decode_table(const struct huffman_state *state, const struct hufcode_t *codebook, size_t num_codes) {
+
+
+
+}
+
+static int decode_file_slow(const struct huffman_state *state, const char *infile, const char *outfile) {
+	uint8_t buf[1024];
+
+	char filename_buf[256];
+	snprintf(filename_buf, sizeof(filename_buf), "%s.huff.cb", infile);
+
+	// Read codebook back
+	FILE *fbook = fopen(filename_buf, "rb");
+	size_t buf_len = fread(buf, 1, sizeof(buf), fbook);
+	fclose(fbook);
+
+	// Reconstruct
+	struct hufcode_t codebook[256] = { 0 };
+	printf("Read %zu bytes of codebook.\n", buf_len);
+	size_t num_codes = reconstruct_codebook1(buf, buf_len, codebook, 256);
+
+	dump_codebook(codebook, num_codes, 0);
+
+	huff_generate_decode_table(state, codebook, num_codes);
+
+	return 0;
+}
+
 int main(int argc, char *argv[]) {
-	const char *infile = argc > 1 ? argv[1] : "tests/input-wp.txt";
+	const char *op = argc > 1 ? argv[1] : "e";
+	const char *infile = argc > 2 ? argv[2] : "tests/input-wp.txt";
 	const char *outfile = "output.huff";
 	uint8_t buf[1024];
 
-	FILE *f = fopen(infile, "rb");
-	if (!f) {
-		fprintf(stderr, "Couldn't open input file '%s'.\n", infile);
-		exit(1);
-	}
-
-	size_t counts[256] = { 0 };
-
-	size_t bytes_read = 0;
-	while (!feof(f) && !ferror(f)) {
-		size_t buf_len = fread(buf, 1, sizeof(buf), f);
-		count_symbols(counts, buf, buf_len);
-		bytes_read += buf_len;
-		// break;
-	}
-	fclose(f);
-	printf("%zu bytes in input.\n", bytes_read);
-
 	struct huffman_state state = { 0 };
 	huff_init(&state);
-	huff_build(&state, counts);
 
-	encode_file(&state, infile, outfile);
-	// TODO: encode using state. state should be const! or we need to break out const vs dynamic state.
-	//huff_encode(&state, src, slen, dest, dlen)
+	int do_encode = (*op != 'd');
+
+	if (do_encode) {
+		printf("Encoding...\n");
+		FILE *f = fopen(infile, "rb");
+		if (!f) {
+			fprintf(stderr, "Couldn't open input file '%s'.\n", infile);
+			exit(1);
+		}
+
+		size_t counts[256] = { 0 };
+
+		size_t bytes_read = 0;
+		while (!feof(f) && !ferror(f)) {
+			size_t buf_len = fread(buf, 1, sizeof(buf), f);
+			count_symbols(counts, buf, buf_len);
+			bytes_read += buf_len;
+		}
+		fclose(f);
+		printf("%zu bytes in input.\n", bytes_read);
+
+		huff_build(&state, counts);
+		// TODO: encode using state. state should be const! or we need to break out const vs dynamic state.
+		encode_file_slow(&state, infile, outfile);
+	} else {
+		printf("Decoding...\n");
+
+		decode_file_slow(&state, infile, outfile);
+	}
 
 	return 0;
 }
