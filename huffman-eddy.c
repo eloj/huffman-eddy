@@ -33,7 +33,7 @@ typedef uint_fast16_t code_t;
 struct hufcode_t {
 	uint16_t code;	// code_t
 	uint8_t nbits;
-	uint8_t sym;
+	uint8_t sym;	// Should syms be a separate array?
 };
 
 static_assert(sizeof(struct symnode_t) == 8, "Unexpected symnode_t size");
@@ -250,6 +250,12 @@ static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *sy
 	return root;
 }
 
+static void print_bits(int a, int nbits) {
+	for (int b = nbits ; b > 0 ; --b) {
+		printf("%c", "01"[a & (1L << (b-1)) ? 1 : 0]);
+	}
+}
+
 static void dump_codebook(const struct hufcode_t *codebook, size_t num_codes, int hide_unused) {
 	printf("Dumping Huffman codebook (n=%d):\n", (int)num_codes);
 
@@ -257,12 +263,7 @@ static void dump_codebook(const struct hufcode_t *codebook, size_t num_codes, in
 		struct hufcode_t entry = codebook[i];
 		if (entry.nbits > 0 || !hide_unused) {
 			printf("[%03d] sym=%3d, nbits=%2d, code=(%04x): ", (int)i, entry.sym, entry.nbits, entry.code);
-			for (int b = entry.nbits ; b > 0 ; --b) {
-				if (entry.code & (1L << (b-1)))
-					printf("1");
-				else
-					printf("0");
-			}
+			print_bits(entry.code, entry.nbits);
 			printf("\n");
 		}
 	}
@@ -528,6 +529,10 @@ static int decode_file_slow(const struct huffman_state *state, const char *infil
 
 	// Read codebook back
 	FILE *fbook = fopen(filename_buf, "rb");
+	if (!fbook) {
+		fprintf(stderr, "Couldn't open codebook '%s'\n", filename_buf);
+		return -1;
+	}
 	size_t buf_len = fread(buf, 1, sizeof(buf), fbook);
 	fclose(fbook);
 
