@@ -1,11 +1,10 @@
-#ARCH:=x86-64-v3 ; github `ubuntu-latest` compiler too old. <sigh>
-ARCH:=native
+ARCH:=x86-64-v3
 OPT=-O3 -fomit-frame-pointer -funroll-loops -fstrict-aliasing -march=$(ARCH) -mtune=native -msse4.2 -mavx
 LTOFLAGS=-flto -fno-fat-lto-objects -fuse-linker-plugin
 WARNFLAGS=-Wall -Wextra -Wshadow -Wstrict-aliasing -Wcast-qual -Wcast-align -Wpointer-arith -Wredundant-decls -Wfloat-equal -Wswitch-enum
 CWARNFLAGS=-Wstrict-prototypes -Wmissing-prototypes
 MISCFLAGS=-fstack-protector -fcf-protection -fvisibility=hidden
-DEVFLAGS=-ggdb -DDEBUG -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function
+DEVFLAGS=-ggdb -DDEBUG -D_FORTIFY_SOURCE=3 -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function
 
 AFLCC?=afl-clang-fast
 

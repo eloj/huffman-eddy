@@ -515,8 +515,90 @@ static int encode_file_slow(const struct huffman_state *state, const char *infil
 	return 0;
 }
 
-static void huff_generate_decode_table(const struct huffman_state *state, const struct hufcode_t *codebook, size_t num_codes) {
+#if 0
+[000] sym= 32, nbits= 3, code=(0000): 000
+[001] sym= 97, nbits= 3, code=(0001): 001
+[002] sym=101, nbits= 3, code=(0002): 010
+[003] sym=102, nbits= 4, code=(0006): 0110
+[004] sym=104, nbits= 4, code=(0007): 0111
+[005] sym=105, nbits= 4, code=(0008): 1000
+[006] sym=109, nbits= 4, code=(0009): 1001
+[007] sym=110, nbits= 4, code=(000a): 1010
+[008] sym=115, nbits= 4, code=(000b): 1011
+[009] sym=116, nbits= 4, code=(000c): 1100
+[010] sym=108, nbits= 5, code=(001a): 11010
+[011] sym=111, nbits= 5, code=(001b): 11011
+[012] sym=112, nbits= 5, code=(001c): 11100
+[013] sym=114, nbits= 5, code=(001d): 11101
+[014] sym=117, nbits= 5, code=(001e): 11110
+[015] sym=120, nbits= 5, code=(001f): 11111
 
+16-3=13
+0000000000000001
+0000000000011111
+
+101111101011111
+
+0  : 00000000
+32 : 00100000
+64 : 01000000
+96 : 01100000
+112: 01110000
+128: 10000000
+144: 10010000
+160: 10100000
+176: 10110000
+192: 11000000
+208: 11010000
+216: 11011000
+224: 11100000
+232: 11101000
+240: 11110000
+248: 11111000
+#endif
+
+#define DECTBL_BITS 8
+
+static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t num_codes, uint16_t *dectbl, size_t dectbl_num) {
+
+	printf("Generating %d-bit Huffman decode table, %zu entries\n", DECTBL_BITS, dectbl_num);
+
+	code_t i = 0;
+	code_t code = 0;
+	code_t switch_code = 0;
+	while (code < dectbl_num) {
+		// XXX: broken, need to mask out DECTBL_BITS
+		// We want the DECTBL_BITS top bits of the code, padded with zeros of shorter.
+		switch_code = (i + 1 < num_codes) ? (code_t)(codebook[i + 1].code << (16 - DECTBL_BITS - codebook[i + 1].nbits)) : dectbl_num;
+		printf("code:%d to switch_code:%d, code_idx=%d\n", (int)code, (int)switch_code - 1, (int)i);
+		for (size_t j = code ; j < switch_code ; ++j) {
+			assert(j < dectbl_num);
+			dectbl[j] = i;
+		}
+		code = switch_code;
+		++i;
+	}
+	if (i < num_codes) {
+		// TODO: Need to generate side-tables...
+		printf("WARNING: incomplete table; next code to handle:%d\n", (int)i);
+	}
+	
+#if 0
+	code_t switch_code = 0;
+	for (size_t i = 0 ; i < dectbl_num ; ++i) {
+		if (i == switch_code) {
+			printf("switch_code:%d, code_idx=%d\n", (int)switch_code, code_idx);
+			++code_idx;
+			switch_code = codebook[code_idx & 0xFF].code << (8 - codebook[code_idx & 0xFF].nbits);
+		}
+		dectbl[i] = code_idx - 1;
+		// printf("%zu -> %d\n", i, (int)dectbl[i]);
+	}
+	if (code_idx < (int)num_codes) {
+		// TODO: Need to generate side-tables...
+		printf("WARNING: incomplete table; next code to handle:%d\n", code_idx);
+	}
+#endif
 
 
 }
@@ -528,13 +610,13 @@ static int decode_file_slow(const struct huffman_state *state, const char *infil
 	snprintf(filename_buf, sizeof(filename_buf), "%s.huff.cb", infile);
 
 	// Read codebook back
-	FILE *fbook = fopen(filename_buf, "rb");
-	if (!fbook) {
+	FILE *f = fopen(filename_buf, "rb");
+	if (!f) {
 		fprintf(stderr, "Couldn't open codebook '%s'\n", filename_buf);
 		return -1;
 	}
-	size_t buf_len = fread(buf, 1, sizeof(buf), fbook);
-	fclose(fbook);
+	size_t buf_len = fread(buf, 1, sizeof(buf), f);
+	fclose(f);
 
 	// Reconstruct
 	struct hufcode_t codebook[256] = { 0 };
@@ -543,7 +625,23 @@ static int decode_file_slow(const struct huffman_state *state, const char *infil
 
 	dump_codebook(codebook, num_codes, 0);
 
-	huff_generate_decode_table(state, codebook, num_codes);
+	uint16_t dectbl[1 << DECTBL_BITS] = { 0 };
+	size_t dectbl_num = sizeof(dectbl)/sizeof(dectbl[0]);
+
+	huff_generate_decode_table(codebook, num_codes, dectbl, dectbl_num);
+
+	snprintf(filename_buf, sizeof(filename_buf), "%s.huff", infile);
+	f = fopen(filename_buf, "rb");
+	if (!f) {
+		fprintf(stderr, "Couldn't open codebook '%s'\n", filename_buf);
+		return -1;
+	}
+	buf_len = fread(buf, 1, sizeof(buf), f);
+	fclose(f);
+
+	printf("Read %zu bytes of Huffman data.\n", buf_len);
+
+	// TODO: loop over buffer data bits, output symbols using dectbl.
 
 	return 0;
 }
