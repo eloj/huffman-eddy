@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
 /*
 	TODO:
 	* Fix dummy-node/1-symbol hackery.
@@ -326,50 +327,46 @@ static inline void count_symbols(size_t *counts, uint8_t *input, size_t len) {
 	}
 }
 
-static int write_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t num_groups, const char *outfile) {
+static int calc_codebook1_size(unsigned int num_groups, size_t len) {
+	return len + 1 + num_groups;
+}
 
-	FILE *f = fopen(outfile, "wb");
-	if (!f) {
-		fprintf(stderr, "Couldn't open output file '%s'.\n", outfile);
-		return 1;
-	}
+static int gen_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t num_groups, uint8_t *cb_buf, size_t cb_size) {
 
-	size_t codebook_size = 1 + num_groups + len;
+	size_t codebook_size = calc_codebook1_size(num_groups, len);
 	printf("Calculated codebook size=%zu bytes.\n", codebook_size);
 
-	uint8_t b = num_groups << 4 | codebook[0].nbits;
-	fwrite(&b, 1, 1, f);
+	if (cb_size < codebook_size) {
+		return -1;
+	}
 
-	// XXX: bugged. Do this to memory buffer instead.
-	b = 0;
+	assert(codebook_size <= cb_size);
+
+	size_t pos = 0;
+	memset(cb_buf, 0, codebook_size);
+	cb_buf[pos++] = num_groups << 4 | codebook[0].nbits;
+
+	// XXX: Feels... bad
+	int b = 0;
 	int prevbits = codebook[0].nbits;
 	for (size_t i = 0 ; i < len ; ++i) {
 		if (codebook[i].nbits != prevbits) {
-			int num_skip = codebook[i].nbits - prevbits;
-			fwrite(&b, 1, 1, f);
-			b = 0;
-			for (int j=1 ; j < num_skip ; ++j) {
-				printf("XXX: adding zero group at %d\n", (int)i);
-				fwrite(&b, 1, 1, f);
-			}
+			cb_buf[pos] = b;
+			pos += codebook[i].nbits - prevbits;
 			prevbits = codebook[i].nbits;
-			b = 1;
-		} else {
-			++b;
+			b = 0;
 		}
+		++b;
 	}
-	if (b) {
-		fwrite(&b, 1, 1, f);
-	}
+	cb_buf[pos++] = b;
 
 	for (size_t i = 0 ; i < len ; ++i) {
-		b = codebook[i].sym;
-		fwrite(&b, 1, 1, f);
+		cb_buf[pos++] = codebook[i].sym;
 	}
 
-	fclose(f);
+	assert(pos == codebook_size);
 
-	return 0;
+	return pos;
 }
 
 static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct hufcode_t *codebook, size_t len) {
@@ -456,12 +453,24 @@ static int encode_file_slow(const struct huffman_state *state, const char *infil
 		codebook[state->codebook[i].sym] = state->codebook[i];
 	}
 
-	write_codebook1(state->codebook, state->num_codes, state->num_groups, "codebook1.huff");
+	int cb_len = gen_codebook1(state->codebook, state->num_codes, state->num_groups, buf, sizeof(buf));
+	if (cb_len < 0) {
+		fprintf(stderr, "Error generating type-1 codebook\n");
+		return 1;
+	}
+	// write_codebook1(state->codebook, state->num_codes, state->num_groups, "codebook1.huff");
+	FILE *fbook = fopen("codebook1.huff", "wb");
+	if (!fbook) {
+		fprintf(stderr, "Couldn't open codebook output '%s'.\n", "codebook1.huff");
+		return 1;
+	}
+	fwrite(buf, 1, cb_len, fbook);
+	fclose(fbook);
 
 #if DEBUG
 {
 	// Read codebook back
-	FILE *fbook = fopen("codebook1.huff", "rb");
+	fbook = fopen("codebook1.huff", "rb");
 	size_t buf_len = fread(buf, 1, sizeof(buf), fbook);
 	fclose(fbook);
 	// Reconstruct
@@ -568,7 +577,7 @@ static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t 
 	code_t switch_code = 0;
 	while (code < dectbl_num) {
 		// XXX: broken, need to mask out DECTBL_BITS
-		// We want the DECTBL_BITS top bits of the code, padded with zeros of shorter.
+		// We want the DECTBL_BITS top bits of the code, padded with zeros if shorter.
 		switch_code = (i + 1 < num_codes) ? (code_t)(codebook[i + 1].code << (16 - DECTBL_BITS - codebook[i + 1].nbits)) : dectbl_num;
 		printf("code:%d to switch_code:%d, code_idx=%d\n", (int)code, (int)switch_code - 1, (int)i);
 		for (size_t j = code ; j < switch_code ; ++j) {
