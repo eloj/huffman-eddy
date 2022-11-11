@@ -251,21 +251,13 @@ static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *sy
 	return root;
 }
 
-static void print_bits(int a, int nbits) {
-	for (int b = nbits ; b > 0 ; --b) {
-		printf("%c", "01"[a & (1L << (b-1)) ? 1 : 0]);
-	}
-}
-
 static void dump_codebook(const struct hufcode_t *codebook, size_t num_codes, int hide_unused) {
 	printf("Dumping Huffman codebook (n=%d):\n", (int)num_codes);
 
 	for (size_t i = 0 ; i < num_codes ; ++i) {
 		struct hufcode_t entry = codebook[i];
 		if (entry.nbits > 0 || !hide_unused) {
-			printf("[%03d] sym=%3d, nbits=%2d, code=(%04x): ", (int)i, entry.sym, entry.nbits, entry.code);
-			print_bits(entry.code, entry.nbits);
-			printf("\n");
+			printf("[%03d] sym=%3d, nbits=%2d, code=(%04x): %.*b\n", (int)i, entry.sym, entry.nbits, entry.code, entry.nbits, entry.code);
 		}
 	}
 }
