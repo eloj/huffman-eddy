@@ -5,6 +5,9 @@
 #include <assert.h>
 #include <string.h>
 /*
+	WORK ON:
+	./huffman-eddy d test1 test1.output
+
 	TODO:
 	* Fix dummy-node/1-symbol hackery.
 	* Replace q1 with pulling directly from the symstore.
@@ -47,10 +50,6 @@ struct huffman_state {
 	struct hufcode_t codebook[256]; // initially NOT mapped by symbol!
 };
 
-static void huff_init(struct huffman_state *state) {
-	// Maybe we'll get away with zero-init and not need this.
-}
-
 typedef uint16_t qitem_t;
 
 struct queue {
@@ -60,32 +59,32 @@ struct queue {
 
 #if 0
 static void queue_dump(struct queue *q) {
-	printf("Dumping queue @ %p (.head=%d, .tail=%d, isempty:%d, isfull:%d):\n", q, (int)q->head, (int)q->tail, queue_isempty(q), queue_isfull(q));
+	printf("Dumping queue @ %p (.head=%d, .tail=%d, is_empty:%d, is_full:%d):\n", q, (int)q->head, (int)q->tail, queue_is_empty(q), queue_is_full(q));
 	for (size_t i=q->head ; i < q->tail ; ++i) {
 		printf("[%03d] item %d\n", (int)i, (int)q->q[i]);
 	}
 };
 #endif
 
-static inline int queue_isempty(struct queue *q) {
+static inline int queue_is_empty(struct queue *q) {
 	return q->tail == q->head;
-}
-
-static inline int queue_isfull(struct queue *q) {
-	return q->tail == 256;
 }
 
 static inline qitem_t queue_peek(struct queue *q) {
 	return q->q[q->head];
 }
 
+static inline int queue_is_full(struct queue *q) {
+	return q->tail == 256;
+}
+
 static inline void queue_push(struct queue *q, qitem_t item) {
-	assert(!queue_isfull(q));
+	assert(!queue_is_full(q));
 	q->q[q->tail++] = item;
 }
 
 static inline qitem_t queue_pop(struct queue *q) {
-	assert(!queue_isempty(q));
+	assert(!queue_is_empty(q));
 	qitem_t res = q->q[q->head++];
 	return res;
 }
@@ -94,14 +93,14 @@ static inline qitem_t queue_pop(struct queue *q) {
 static qitem_t pop_min(struct queue *q1, struct queue *q2, struct symnode_t *symstore, qitem_t default_item) {
 	qitem_t item;
 
-	if (!queue_isempty(q1) && !queue_isempty(q2)){
+	if (!queue_is_empty(q1) && !queue_is_empty(q2)){
 		qitem_t t1 = queue_peek(q1);
 		qitem_t t2 = queue_peek(q2);
 		// "To minimize variance, simply break ties between queues by choosing the item in the first queue."
 		item = queue_pop(symstore[t1].cnt <= symstore[t2].cnt ? q1 : q2);
-	} else if (!queue_isempty(q1)) {
+	} else if (!queue_is_empty(q1)) {
 		item = queue_pop(q1);
-	} else if (!queue_isempty(q2)) {
+	} else if (!queue_is_empty(q2)) {
 		item = queue_pop(q2);
 	} else {
 		item = default_item;
@@ -174,20 +173,19 @@ static void huff_build_code(struct huffman_state *state, struct symnode_t *tree,
 	build_code_helper(state, tree, root, code, codelen);
 }
 
-static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *symstore, size_t *counts) {
+// Build huffman symbol tree from counts[256]
+static qitem_t huff_build_tree(struct symnode_t *symstore, size_t counts [const static 256]) {
 	printf("Building Huffman tree.\n");
 	printf("sizeof(symnode_t)=%zu\n", sizeof(struct symnode_t));
 
 	struct queue q1 = { 0 };
 	struct queue q2 = { 0 };
 
-	size_t num_nodes = 0;
-	size_t num_syms = 0;
-
 	// TODO: Calculate optimized size based on actual symbol count
 	printf("Queues use 2*%zu bytes.\n", sizeof(q1.q));
 
 	// Generate leaf nodes in storage array.
+	size_t num_nodes = 0;
 	for (size_t i = 0 ; i < 256 ; ++i) {
 		if (counts[i] > 0) {
 			symstore[num_nodes] = (struct symnode_t){
@@ -202,7 +200,7 @@ static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *sy
 			++num_nodes;
 		}
 	}
-	num_syms = num_nodes;
+	size_t num_syms = num_nodes; // TODO: can merge these when debug block goes away.
 	// queue_dump(&q1);
 	// queue_dump(&q2);
 	printf("%zu leaf symbols in store.\n", num_syms);
@@ -226,15 +224,15 @@ static qitem_t huff_build_tree(struct huffman_state *state, struct symnode_t *sy
 			.right = item2,
 		};
 
-		done = queue_isempty(&q2) && queue_isempty(&q1);
+		done = queue_is_empty(&q2) && queue_is_empty(&q1);
 
 		queue_push(&q2, num_nodes++);
 	}
 	qitem_t root = queue_pop(&q2);
 	// queue_dump(&q1);
 	// queue_dump(&q2);
-	assert(queue_isempty(&q1));
-	assert(queue_isempty(&q2));
+	assert(queue_is_empty(&q1));
+	assert(queue_is_empty(&q2));
 
 #if DEBUG
 	for (size_t i = 0 ; i < num_nodes ; ++i) {
@@ -301,16 +299,17 @@ static void huff_build_canonical(struct huffman_state *state) {
 
 }
 
-static void huff_build(struct huffman_state *state, size_t *counts) {
+static void huff_build(struct huffman_state *state, size_t counts [const static 256]) {
 	struct symnode_t symstore[512];
 
 	// TODO: pass in length of symstore so we can assert on OOB.
-	qitem_t root = huff_build_tree(state, symstore, counts);
+	qitem_t root = huff_build_tree(symstore, counts);
 	printf("Root node = %d\n", (int)root);
 	huff_build_code(state, symstore, root);
-	// dump_codebook(state);
 	huff_build_canonical(state);
+#if DEBUG
 	dump_codebook(state->codebook, state->num_codes, 0);
+#endif
 }
 
 static inline void count_symbols(size_t *counts, uint8_t *input, size_t len) {
@@ -362,6 +361,8 @@ static int gen_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t n
 }
 
 static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct hufcode_t *codebook, size_t len) {
+	(void)buf_len;
+	(void)len;
 	// NOTE: Can't use buf_len to deduce layout/size.
 	uint8_t num_groups = buf[0] >> 4;
 	uint8_t min_bits = buf[0] & 0x0F;
@@ -378,6 +379,7 @@ static size_t reconstruct_codebook1(const uint8_t *buf, size_t buf_len, struct h
 	uint8_t codelen = min_bits;
 	code_t code = 0;
 	unsigned int idx = 0;
+
 	for (unsigned int i = 0 ; i < num_groups ; ++i) {
 		assert(idx < len);
 		int sym_cnt = buf[1 + i];
@@ -439,7 +441,7 @@ static int encode_file_slow(const struct huffman_state *state, const char *infil
 
 	printf("Compressing '%s' to '%s'\n", infile, outfile);
 
-	// TODO: Should be able to do this in-place effectively? A type of redistribution/sort.
+	// MEM-OPT: Should be able to do this in-place effectively? A type of redistribution/sort.
 	struct hufcode_t codebook[256] = { 0 };
 	for (size_t i = 0 ; i < state->num_codes ; ++i) {
 		codebook[state->codebook[i].sym] = state->codebook[i];
@@ -450,7 +452,6 @@ static int encode_file_slow(const struct huffman_state *state, const char *infil
 		fprintf(stderr, "Error generating type-1 codebook\n");
 		return 1;
 	}
-	// write_codebook1(state->codebook, state->num_codes, state->num_groups, "codebook1.huff");
 	FILE *fbook = fopen("codebook1.huff", "wb");
 	if (!fbook) {
 		fprintf(stderr, "Couldn't open codebook output '%s'.\n", "codebook1.huff");
@@ -583,7 +584,7 @@ static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t 
 		// TODO: Need to generate side-tables...
 		printf("WARNING: incomplete table; next code to handle:%d\n", (int)i);
 	}
-	
+
 #if 0
 	code_t switch_code = 0;
 	for (size_t i = 0 ; i < dectbl_num ; ++i) {
@@ -604,7 +605,8 @@ static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t 
 
 }
 
-static int decode_file_slow(const struct huffman_state *state, const char *infile, const char *outfile) {
+static int decode_file_slow(const char *infile, const char *outfile) {
+	// struct huffman_state *state;
 	uint8_t buf[1024];
 
 	char filename_buf[256];
@@ -642,7 +644,11 @@ static int decode_file_slow(const struct huffman_state *state, const char *infil
 
 	printf("Read %zu bytes of Huffman data.\n", buf_len);
 
+	printf("Decompressing to file '%s'\n", outfile);
+	f = fopen(outfile, "wb");
 	// TODO: loop over buffer data bits, output symbols using dectbl.
+
+	fclose(f);
 
 	return 0;
 }
@@ -650,11 +656,10 @@ static int decode_file_slow(const struct huffman_state *state, const char *infil
 int main(int argc, char *argv[]) {
 	const char *op = argc > 1 ? argv[1] : "e";
 	const char *infile = argc > 2 ? argv[2] : "tests/input-wp.txt";
-	const char *outfile = "output.huff";
+	const char *outfile = argc > 3 ? argv[3] : "output.huff";
 	uint8_t buf[1024];
 
 	struct huffman_state state = { 0 };
-	huff_init(&state);
 
 	int do_encode = (*op != 'd');
 
@@ -678,12 +683,11 @@ int main(int argc, char *argv[]) {
 		printf("%zu bytes in input.\n", bytes_read);
 
 		huff_build(&state, counts);
-		// TODO: encode using state. state should be const! or we need to break out const vs dynamic state.
 		encode_file_slow(&state, infile, outfile);
 	} else {
 		printf("Decoding...\n");
 
-		decode_file_slow(&state, infile, outfile);
+		decode_file_slow(infile, outfile);
 	}
 
 	return 0;
