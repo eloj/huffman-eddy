@@ -52,6 +52,9 @@ huffman-eddy: huffman-eddy.c build_const.h
 test: huffman-eddy
 	${TEST_PREFIX} ./huffman-eddy
 
+cppcheck:
+	@cppcheck --verbose --error-exitcode=1 --enable=warning,performance,portability .
+
 backup:
 	@echo -e $(YELLOW)Making backup$(NC)
 	tar -cJf ../$(notdir $(CURDIR))-`date +"%Y-%m"`.tar.xz ../$(notdir $(CURDIR))
