@@ -23,6 +23,8 @@
 	* Function to get memory reqs for queues based on symbol count.
 */
 
+#define DECTBL_BITS 15
+
 // #define HUFFMAN_SYMBOL_SIZE (1 << 8)
 // #define HUFFMAN_MAX_CODES (HUFFMAN_SYMBOL_SIZE << 1)
 struct symnode_t {
@@ -533,11 +535,9 @@ static int encode_file_slow(const struct huffman_state *state, const char *infil
 	return 0;
 }
 
-#define DECTBL_BITS 9
-
 // Decode table points into codebook, such that for ANY bits used to index it, we get the correct symbol
 // TODO: if nbits > DECTBL_BITS we need to mark entries as 'invalid' and use a slow-path (or sub-table) at decode time.
-static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t num_codes, uint16_t *dectbl, size_t dectbl_num) {
+static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t num_codes, uint8_t *dectbl, size_t dectbl_num) {
 
 	printf("Generating %d-bit Huffman decode table, %zu entries\n", DECTBL_BITS, dectbl_num);
 
@@ -569,10 +569,12 @@ static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t 
 	}
 	used += (int)(dectbl_num - used);
 
+#if 0
 	printf("-- decode table --\n");
 	for (int j = 0 ; j < used ; ++j) {
 		printf("[%04x] => %d\n", j, dectbl[j]);
 	}
+#endif
 
 }
 
@@ -599,15 +601,17 @@ static int decode_file_slow(const char *infile, const char *outfile) {
 
 	dump_codebook(codebook, num_codes, 0);
 
-	uint16_t dectbl[1 << DECTBL_BITS] = { 0 };
+	uint8_t dectbl[1 << DECTBL_BITS] = { 0 };
 	size_t dectbl_num = sizeof(dectbl)/sizeof(dectbl[0]);
 
 	printf("Decode table size=%zu bytes (%zu entries).\n", sizeof(dectbl), dectbl_num);
 
 	huff_generate_decode_table(codebook, num_codes, dectbl, dectbl_num);
 
-	printf("Aborting -- debug XXX\n");
-	exit(0);
+	if (DECTBL_BITS != 15) {
+		printf("Aborting -- DECTBL_BITS %d != 15\n", DECTBL_BITS);
+		exit(0);
+	}
 
 	snprintf(filename_buf, sizeof(filename_buf), "%s.huff", infile);
 	f = fopen(filename_buf, "rb");
@@ -620,18 +624,19 @@ static int decode_file_slow(const char *infile, const char *outfile) {
 	FILE *fout = fopen(outfile, "wb");
 	assert(fout);
 
-	// TODO: refill bitreader when buf out.
-	buf_len = fread(buf, 1, sizeof(buf), f);
-	printf("Read %zu bytes of Huffman data.\n", buf_len);
-
-	struct bit_reader br = { .buffer=buf, .buffer_len=buf_len };
+	uint8_t bit_buf[128];
+	struct bit_reader br = { .buffer=bit_buf, .buffer_size=sizeof(bit_buf), .fin=f };
 	size_t left;
 	while ((left = bits_left(&br)) > codebook[0].nbits) {
-		code_t oidx = bits_get_16(&br, DECTBL_BITS, 1);
-		code_t idx = dectbl[oidx << (left < DECTBL_BITS ? DECTBL_BITS - left : 0)];
-		printf("emit sym:'%c' (%d bits, %.*b from %08b, bits_left=%zu)\n", codebook[idx].sym, codebook[idx].nbits, codebook[idx].nbits, codebook[idx].code, (int)oidx, left);
+		code_t dectbl_idx = bits_get_16(&br, DECTBL_BITS, 1);
+
+		assert(dectbl_idx < (1UL << DECTBL_BITS));
+		code_t idx = dectbl[dectbl_idx];
+
 		bits_consume(&br, codebook[idx].nbits);
 		fputc(codebook[idx].sym, fout);
+
+		// printf("emit sym:'%c' (%d bits, %.*b from %08b, bits_left=%zu)\n", codebook[idx].sym, codebook[idx].nbits, codebook[idx].nbits, codebook[idx].code, (int)oidx, left);
 	}
 	if (left > 0 ) {
 		printf("Not enough bits for more valid symbols, we're done.\n");
@@ -648,7 +653,6 @@ int main(int argc, char *argv[]) {
 	const char *op = argc > 1 ? argv[1] : "e";
 	const char *infile = argc > 2 ? argv[2] : "tests/input-wp.txt";
 	const char *outfile = argc > 3 ? argv[3] : "output.huff";
-	uint8_t buf[1024];
 
 	int do_encode = (*op != 'd');
 
@@ -662,6 +666,7 @@ int main(int argc, char *argv[]) {
 			exit(1);
 		}
 
+		uint8_t buf[1024];
 		size_t counts[256] = { 0 };
 
 		size_t bytes_read = 0;

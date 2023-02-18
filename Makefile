@@ -46,14 +46,14 @@ build_const.h: FORCE
 		mv $@.tmp $@ ; \
 	fi
 
-huffman-eddy: huffman-eddy.c build_const.h
+huffman-eddy: huffman-eddy.c bitio.c build_const.h
 	$(CC) $(CFLAGS) $< -o $@
 
 test: huffman-eddy
 	${TEST_PREFIX} ./huffman-eddy
 
 cppcheck:
-	@cppcheck --verbose --error-exitcode=1 --enable=warning,performance,portability .
+	@cppcheck --verbose --error-exitcode=1 --enable=warning,style,performance,portability .
 
 backup:
 	@echo -e $(YELLOW)Making backup$(NC)

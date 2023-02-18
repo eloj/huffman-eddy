@@ -1,17 +1,39 @@
+/* This is a mess :-\ */
 
 struct bit_reader {
 	uint8_t* buffer;
 	size_t   buffer_len;
+	size_t   buffer_size;
 	size_t	 bitptr;
 	uint64_t reservoir;
 	int		 reservoir_bits;
+	FILE*	 fin;
 };
 
 size_t bits_left(struct bit_reader* br);
 uint16_t bits_get_16(struct bit_reader* br, int bits, int peek);
 void bits_consume(struct bit_reader* br, int bits);
+size_t bits_refill_from_file(struct bit_reader *br);
+
+size_t bits_refill_from_file(struct bit_reader *br) {
+	if (!br->fin || feof(br->fin)) {
+		return 0;
+	}
+
+	assert(br->bitptr == 0 || br->bitptr == br->buffer_len);
+
+	br->buffer_len = fread(br->buffer, 1, br->buffer_size, br->fin);
+	br->bitptr = 0;
+
+	// printf("Read %zu bytes in bitreader.\n", br->buffer_len);
+	return br->buffer_len;
+}
 
 size_t bits_left(struct bit_reader* br) {
+	if ((br->bitptr == 0 && br->reservoir_bits == 0) || (br->bitptr == br->buffer_len)) {
+		bits_refill_from_file(br);
+	}
+
 	return ((br->buffer_len - br->bitptr) * 8) + br->reservoir_bits;
 }
 
@@ -20,6 +42,9 @@ static void bits_fill(struct bit_reader* br) {
 		br->reservoir <<= 8;
 		br->reservoir |= br->buffer[br->bitptr++];
 		br->reservoir_bits += 8;
+		if (br->bitptr == br->buffer_len) {
+			bits_refill_from_file(br);
+		}
 		// printf("<fill8>");
 	}
 }
@@ -32,13 +57,15 @@ uint16_t bits_get_16(struct bit_reader* br, int bits, int peek) {
 		bits_fill(br);
 
 	// Clamp to remaining bits
+	unsigned int revshift = 0;
 	if (bits > br->reservoir_bits) {
-		// printf("CLAMP! %d > %d\n", bits, br->reservoir_bits);
+		revshift = bits - br->reservoir_bits;
+		// printf("CLAMP! %d > %d, revshift=%d\n", bits, br->reservoir_bits, revshift);
 		bits = br->reservoir_bits;
 	}
 
 	// printf("GET(%d) FROM R:%016llx\n", bits, br->reservoir & ((1UL << br->reservoir_bits)-1));
-	uint16_t ret = br->reservoir >> (br->reservoir_bits - bits) & ((1UL << bits)-1);
+	uint16_t ret = ((br->reservoir >> (br->reservoir_bits - bits)) & ((1UL << bits)-1)) << revshift;
 	if (!peek)
 		br->reservoir_bits -= bits;
 
