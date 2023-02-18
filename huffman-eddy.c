@@ -437,7 +437,7 @@ static void output_bits_f(FILE *f, code_t code, uint8_t nbits, int flush) {
 
 }
 
-static int encode_file_slow(const struct huffman_state *state, const char *infile, const char *outfile) {
+static int encode_file_slow(const struct huffman_state *state, size_t bytes_in, const char *infile, const char *outfile) {
 	uint8_t buf[1024];
 
 	FILE *f = fopen(infile, "rb");
@@ -451,6 +451,9 @@ static int encode_file_slow(const struct huffman_state *state, const char *infil
 		fprintf(stderr, "Couldn't open output file '%s'.\n", infile);
 		return 1;
 	}
+
+	printf("Writing length (%08zx) to output.\n", bytes_in);
+	fwrite(&bytes_in, sizeof(bytes_in), 1, fout);
 
 	printf("Compressing '%s' to '%s'\n", infile, outfile);
 
@@ -620,6 +623,13 @@ static int decode_file_slow(const char *infile, const char *outfile) {
 		return -1;
 	}
 
+	size_t bytes_in = 0;
+	if (fread(&bytes_in, sizeof(bytes_in), 1, f) != 1) {
+		fprintf(stderr, "Failed to read file size from input.\n");
+		return -1;
+	}
+	printf("Read length (%08zx) from input.\n", bytes_in);
+
 	printf("Decompressing to file '%s'\n", outfile);
 	FILE *fout = fopen(outfile, "wb");
 	assert(fout);
@@ -627,7 +637,7 @@ static int decode_file_slow(const char *infile, const char *outfile) {
 	uint8_t bit_buf[128];
 	struct bit_reader br = { .buffer=bit_buf, .buffer_size=sizeof(bit_buf), .fin=f };
 	size_t left;
-	while ((left = bits_left(&br)) > codebook[0].nbits) {
+	while ((left = bits_left(&br)) >= codebook[0].nbits) {
 		code_t dectbl_idx = bits_get_16(&br, DECTBL_BITS, 1);
 
 		assert(dectbl_idx < (1UL << DECTBL_BITS));
@@ -637,8 +647,14 @@ static int decode_file_slow(const char *infile, const char *outfile) {
 		fputc(codebook[idx].sym, fout);
 
 		// printf("emit sym:'%c' (%d bits, %.*b from %08b, bits_left=%zu)\n", codebook[idx].sym, codebook[idx].nbits, codebook[idx].nbits, codebook[idx].code, (int)oidx, left);
+
+		if (--bytes_in == 0) {
+			printf("Decompression completed (%zu bits left unprocessed).\n", bits_left(&br));
+			left = 0;
+			break;
+		}
 	}
-	if (left > 0 ) {
+	if (left > 0) {
 		printf("Not enough bits for more valid symbols, we're done.\n");
 	}
 
@@ -680,7 +696,7 @@ int main(int argc, char *argv[]) {
 
 		struct huffman_state state = { 0 };
 		huff_build(&state, counts);
-		encode_file_slow(&state, infile, outfile);
+		encode_file_slow(&state, bytes_read, infile, outfile);
 	} else {
 		printf("Decoding...\n");
 
