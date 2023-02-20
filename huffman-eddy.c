@@ -325,7 +325,7 @@ static void huff_build(struct huffman_state *state, size_t counts [const static 
 #endif
 }
 
-static inline void count_symbols(size_t *counts, uint8_t *input, size_t len) {
+static inline void count_symbols(size_t *counts, const uint8_t *input, size_t len) {
 	for (size_t i = 0 ; i < len ; ++i) {
 		++counts[input[i]];
 	}
@@ -511,7 +511,7 @@ static int encode_file_slow(const struct huffman_state *state, size_t bytes_in, 
 #endif
 
 	size_t bytes_read = 0;
-	size_t bits_written = 0;
+	size_t bits_written = cb_len * 8; // just to account for codebook savings percentage.
 	while (!feof(f) && !ferror(f)) {
 		size_t buf_len = fread(buf, 1, sizeof(buf), f);
 
@@ -533,7 +533,7 @@ static int encode_file_slow(const struct huffman_state *state, size_t bytes_in, 
 	output_bits_f(fout, 0, 0, 1);
 	fclose(f);
 	fclose(fout);
-	printf("%zu bits (%zu bytes) in output.\n", bits_written, 1+(bits_written/8));
+	printf("%zu bits (%zu of %zu bytes) in output, space saved=%.2f%%\n", bits_written, 1+(bits_written/8), bytes_read, (1.0f-((float)(bits_written/8)/bytes_read))*100.0f);
 
 	return 0;
 }
@@ -626,6 +626,7 @@ static int decode_file_slow(const char *infile, const char *outfile) {
 	size_t bytes_in = 0;
 	if (fread(&bytes_in, sizeof(bytes_in), 1, f) != 1) {
 		fprintf(stderr, "Failed to read file size from input.\n");
+		fclose(f);
 		return -1;
 	}
 	printf("Read length (%08zx) from input.\n", bytes_in);
