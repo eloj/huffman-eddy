@@ -19,8 +19,14 @@ ifdef PERF
 	TEST_PREFIX:=perf stat
 endif
 
-ifdef ANALYZE
+# GCC only
+ifdef ANALYZER
 	MISCFLAGS+=-fanalyzer
+endif
+
+# clang only
+ifdef SANITIZE
+	MISCFLAGS+=-fsanitize=memory
 endif
 
 ifdef OPTIMIZED

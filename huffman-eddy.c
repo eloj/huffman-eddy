@@ -254,7 +254,7 @@ static qitem_t huff_build_tree(struct symnode_t *symstore, size_t counts [const 
 		if (node->left == node->right) {
 			printf("[%03d] (LEAF) sym='%c'(%d), cnt=%d\n", (int)i, (node->sym < 127 && node->sym > 31) ? node->sym : '?', (int)node->sym, (int)node->cnt);
 		} else {
-			printf("[%03d] (%s) cnt=%d, left=%c%d, right=%c%d\n", (int)i, i+1 == num_nodes ? "ROOT" : "INT.", (int)node->cnt, (int)node->left < num_syms ? '*' : ' ', (int)node->left, (int)node->right < num_syms ? '*' : ' ', (int)node->right);
+			printf("[%03d] (%s) cnt=%d, left=%c%d, right=%c%d\n", (int)i, i+1 == num_nodes ? "ROOT" : "INT.", (int)node->cnt, (int)node->left < (int)num_syms ? '*' : ' ', (int)node->left, (int)node->right < (int)num_syms ? '*' : ' ', (int)node->right);
 		}
 	}
 #endif
@@ -342,13 +342,17 @@ static int gen_codebook1(const struct hufcode_t *codebook, size_t len, uint8_t n
 	printf("Calculated codebook1 size=%zu bytes.\n", codebook_size);
 
 	if (cb_size < codebook_size) {
+		fprintf(stderr, "ERROR: buffer provided for gen_codebook1 too small!\n");
 		return -1;
 	}
 
 	assert(codebook_size <= cb_size);
 
+	// Seemingly optimized away by clang-15, whose memory sanitizer then complains about "use-of-uninitialized-value"
+	// memset(cb_buf, 0, codebook_size); // TODO: memset_explicit
+	for (size_t i = 0 ; i < codebook_size ; ++i) cb_buf[i] = 0;
+
 	size_t pos = 0;
-	memset(cb_buf, 0, codebook_size);
 	cb_buf[pos++] = num_groups << 4 | codebook[0].nbits;
 
 	// XXX: Feels... bad
@@ -574,9 +578,9 @@ static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t 
 		assert(used + j < (int)dectbl_num);
 		dectbl[used + j] = i;
 	}
-	used += (int)(dectbl_num - used);
 
 #if 0
+	used += (int)(dectbl_num - used);
 	printf("-- decode table --\n");
 	for (int j = 0 ; j < used ; ++j) {
 		printf("[%04x] => %d\n", j, dectbl[j]);
