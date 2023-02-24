@@ -10,6 +10,7 @@
 	./huffman-eddy d test1 test1.output
 
 	TODO:
+	* Implement code length limiting. We will crash on some (large) inputs as we assert codelen < 16
 	* Add EOF-symbol as last entry? (always room?! prove it)
 	* Fix dummy-node/1-symbol hackery.
 	* Replace q1 with pulling directly from the symstore.
@@ -452,10 +453,10 @@ static int encode_file_slow(const struct huffman_state *state, size_t bytes_in, 
 		return 1;
 	}
 
+	printf("Compressing '%s' to '%s'\n", infile, outfile);
+
 	printf("Writing length (%08zx) to output.\n", bytes_in);
 	fwrite(&bytes_in, sizeof(bytes_in), 1, fout);
-
-	printf("Compressing '%s' to '%s'\n", infile, outfile);
 
 	// MEM-OPT: Should be able to do this in-place effectively? A type of redistribution/sort.
 	struct hufcode_t codebook[256] = { 0 };
@@ -481,7 +482,7 @@ static int encode_file_slow(const struct huffman_state *state, size_t bytes_in, 
 	fwrite(buf, 1, cb_len, fbook);
 	fclose(fbook);
 
-#if DEBUG
+#if DEBUG_CODEBOOK
 {
 	// Read codebook back
 	fbook = fopen(filename_buf, "rb");
@@ -526,6 +527,9 @@ static int encode_file_slow(const struct huffman_state *state, size_t bytes_in, 
 				bits_written += codebook[ch].nbits;
 			} else {
 				printf("ERROR: Invalid symbol in input; no code defined for symbol %d.\n", (int)ch);
+				fclose(f);
+				fclose(fout);
+				return 1;
 			}
 		}
 		bytes_read += buf_len;
@@ -555,7 +559,7 @@ static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t 
 		code_t next_code = codebook[i+1].code << (DECTBL_BITS - codebook[i+1].nbits);
 
 		int num_dec = next_code - this_code;
-		printf("[%03zu] = codelen=%d, %d entries, (total=%d)\n", i, codebook[i].nbits, num_dec, used);
+		// printf("[%03zu] = codelen=%d, %d entries, (total=%d)\n", i, codebook[i].nbits, num_dec, used);
 
 		for (int j = 0 ; j < num_dec ; ++j) {
 			assert(used + j < (int)dectbl_num);
@@ -565,7 +569,7 @@ static void huff_generate_decode_table(const struct hufcode_t *codebook, size_t 
 		used += num_dec;
 	}
 	// Backfill
-	printf("[%03zu] = codelen=%d, %zu entries, (total=%d)\n", i, codebook[i].nbits, dectbl_num - used, used);
+	// printf("[%03zu] = codelen=%d, %zu entries, (total=%d)\n", i, codebook[i].nbits, dectbl_num - used, used);
 	for (int j = 0 ; j < (int)(dectbl_num - used) ; ++j) {
 		assert(used + j < (int)dectbl_num);
 		dectbl[used + j] = i;
@@ -649,6 +653,7 @@ static int decode_file_slow(const char *infile, const char *outfile) {
 
 		// printf("emit sym:'%c' (%d bits, %.*b from %08b, bits_left=%zu)\n", codebook[idx].sym, codebook[idx].nbits, codebook[idx].nbits, codebook[idx].code, (int)oidx, left);
 
+		// Every iteration decodes one byte. Eventually we're done.
 		if (--bytes_in == 0) {
 			printf("Decompression completed (%zu bits left unprocessed).\n", bits_left(&br));
 			left = 0;
@@ -703,7 +708,6 @@ int main(int argc, char *argv[]) {
 
 		decode_file_slow(infile, outfile);
 	}
-
 
 	return 0;
 }

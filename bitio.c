@@ -1,5 +1,7 @@
 /* This is a mess :-\ */
 
+// TODO: change to byteswapped for less shifting?
+
 struct bit_reader {
 	uint8_t* buffer;
 	size_t   buffer_len;
@@ -30,7 +32,7 @@ size_t bits_refill_from_file(struct bit_reader *br) {
 }
 
 size_t bits_left(struct bit_reader* br) {
-	if ((br->bitptr == 0 && br->reservoir_bits == 0) || (br->bitptr == br->buffer_len)) {
+	if (br->reservoir_bits == 0) {
 		bits_refill_from_file(br);
 	}
 
@@ -45,7 +47,6 @@ static void bits_fill(struct bit_reader* br) {
 		if (br->bitptr == br->buffer_len) {
 			bits_refill_from_file(br);
 		}
-		// printf("<fill8>");
 	}
 }
 
